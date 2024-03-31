@@ -1,3 +1,4 @@
+# Madoka Magica Bad Apple
 ---
 
 This is a project that runs Bad Apple(Madoka Magica Ver.) in the windows terminal using dotnet.
