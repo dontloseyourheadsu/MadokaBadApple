@@ -17,10 +17,7 @@ if (!capture.IsOpened())
 using (var audioOutput = new WaveOutEvent())
 using (var audioFile = new AudioFileReader(audioPath))
 {
-    audioOutput.Init(audioFile);
-    audioOutput.Play();
-
-    while (true)
+    do
     {
         using var frameMat = new Mat();
         if (!capture.Read(frameMat) || frameMat.Empty())
@@ -30,10 +27,17 @@ using (var audioFile = new AudioFileReader(audioPath))
         }
 
         var asciiArt = ConvertToAscii(frameMat, outputWidth);
+
+        if (!audioOutput.PlaybackState.Equals(PlaybackState.Playing))
+        {
+            audioOutput.Init(audioFile);
+            audioOutput.Play();
+        }
+
         Console.Clear();
         Console.WriteLine(asciiArt);
         Thread.Sleep(26);
-    }
+    } while (true);
 }
 
 string ConvertToAscii(Mat frame, int outputWidth)
