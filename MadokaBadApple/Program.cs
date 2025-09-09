@@ -6,9 +6,18 @@ using Xabe.FFmpeg;
 using Xabe.FFmpeg.Downloader;
 using Silk.NET.OpenAL;
 using System.Threading;
+using SixLabors.ImageSharp;
+using SixLabors.ImageSharp.PixelFormats;
+using SixLabors.ImageSharp.Processing;
+
+namespace MadokaBadApple;
 
 class Program
 {
+    // Ordered from darkest to lightest (70 chars) for grayscale mapping
+    // Need to escape backslash and double quote inside the C# string. Sequence length 70.
+    private const string ASCIICHARS = "$@B%8&WM#*oahkbdpqwmZO0QLCJUYXzcvunxrjft/\\|()1{}[]?-_+~<>i!lI;:,\"^`'. ";
+
     static async Task Main(string[] args)
     {
         // (1) Resolve input path (arg or default) relative to current working directory
@@ -103,11 +112,11 @@ class Program
         }
         Console.WriteLine($"✅ Audio extracted: {wavPath}");
 
-        // --------------------  PLAY AUDIO WITH PROGRESS  --------------------
-        Console.WriteLine("\nPlaying audio (press Ctrl+C to abort)...");
+        // --------------------  PLAY AUDIO + ASCII VIDEO  --------------------
+        Console.WriteLine("\nPlaying audio + ASCII video (Ctrl+C to abort)...");
         try
         {
-            PlayWavOpenALWithProgress(wavPath);
+            PlayAsciiVideoWithAudio(wavPath, framesDir, targetFps: 24); // attempt 24 fps if extracted accordingly
         }
         catch (Exception ex)
         {
@@ -192,16 +201,25 @@ class Program
         }
     }
 
-    // OpenAL playback with second counter clearing the terminal output.
-    static void PlayWavOpenALWithProgress(string wavPath)
+    // Audio + ASCII video synchronized playback.
+    static void PlayAsciiVideoWithAudio(string wavPath, string framesDir, int targetFps)
     {
         var wav = LoadPcmWav(wavPath);
         short channels = wav.channels;
         int sampleRate = wav.sampleRate;
         short bitsPerSample = wav.bitsPerSample;
         byte[] pcm = wav.pcmData;
-
         if (pcm.Length == 0) throw new InvalidOperationException("No PCM data found in WAV.");
+
+        // Gather frames list
+        var frames = Directory.GetFiles(framesDir, "frame_*.png").OrderBy(f => f).ToArray();
+        if (frames.Length == 0)
+        {
+            Console.WriteLine("No frames to display.");
+            return;
+        }
+
+        double frameDuration = 1.0 / targetFps;
 
         var alc = ALContext.GetApi();
         var al = AL.GetApi();
@@ -215,19 +233,16 @@ class Program
 
             uint buffer = al.GenBuffer();
             uint source = al.GenSource();
-
             var format = (channels, bitsPerSample) switch
             {
                 (1, 16) => BufferFormat.Mono16,
                 (2, 16) => BufferFormat.Stereo16,
                 _ => throw new NotSupportedException("Unsupported channel/bit depth.")
             };
-
             fixed (byte* p = pcm)
             {
                 al.BufferData(buffer, format, p, pcm.Length, sampleRate);
             }
-
             al.SetSourceProperty(source, SourceInteger.Buffer, (int)buffer);
             al.SourcePlay(source);
 
@@ -240,25 +255,45 @@ class Program
                 al.SourceStop(source);
             };
 
-            Console.WriteLine(); // ensure we have at least one line to rewrite
-            do
+            int lastRendered = -1;
+            // Precompute console target size (allow user to resize between frames but we'll adapt basics)
+            while (true)
             {
                 al.GetSourceProperty(source, GetSourceInteger.SourceState, out int rawState);
                 state = (SourceState)rawState;
                 double elapsed = (DateTime.UtcNow - start).TotalSeconds;
                 if (elapsed > totalSeconds) elapsed = totalSeconds;
+                int frameIndex = (int)(elapsed / frameDuration);
+                if (frameIndex >= frames.Length) break;
 
-                // In-place update (carriage return). Pad to overwrite previous longer text.
-                string line = $"Playing audio... {elapsed:0.00}s / {totalSeconds:0.00}s (Ctrl+C to stop)";
-                int pad = Console.WindowWidth - line.Length - 1;
-                if (pad < 0) pad = 0;
-                Console.Write("\r" + line + new string(' ', pad));
-                Thread.Sleep(100);
+                if (frameIndex != lastRendered)
+                {
+                    // Load & convert frame
+                    try
+                    {
+                        string ascii = FrameToAscii(frames[frameIndex], Console.WindowWidth, Console.WindowHeight - 3); // leave lines for status
+                        Console.SetCursorPosition(0, 0);
+                        Console.Write(ascii);
+                        // Status line
+                        string status = $"Frame {frameIndex + 1}/{frames.Length}  t={elapsed:0.00}/{totalSeconds:0.00}s  (Ctrl+C to stop)";
+                        int pad = Math.Max(0, Console.WindowWidth - status.Length - 1);
+                        Console.WriteLine("\n" + status + new string(' ', pad));
+                    }
+                    catch (Exception ex)
+                    {
+                        Console.SetCursorPosition(0, 0);
+                        Console.WriteLine($"[Frame load error: {ex.Message}]");
+                    }
+                    lastRendered = frameIndex;
+                }
+
+                if (state != SourceState.Playing && frameIndex >= frames.Length - 1) break;
+                int sleep = (int)(frameDuration * 1000 / 3); // poll ~3x per frame for timing
+                if (sleep < 1) sleep = 1;
+                Thread.Sleep(sleep);
             }
-            while (state == SourceState.Playing);
 
             Console.WriteLine();
-
             al.SourceStop(source);
             al.DeleteSource(source);
             al.DeleteBuffer(buffer);
@@ -266,6 +301,51 @@ class Program
             alc.CloseDevice(device);
             Console.WriteLine("Playback finished.");
         }
+    }
+
+    static string FrameToAscii(string path, int consoleWidth, int consoleHeight)
+    {
+        if (consoleWidth < 10 || consoleHeight < 5) return "[Console too small]";
+        // Using ImageSharp to load and resize preserving aspect ratio. Terminal character cells are roughly twice as tall as wide.
+        // We'll adjust height by scaling image height to (targetHeight * (charAspect)). charAspect ~0.5 (since char is taller) so use factor.
+        double charAspect = 0.5; // width/height ratio approximate
+        int targetWidth = Math.Max(8, consoleWidth);
+        int targetHeight = Math.Max(4, (int)(consoleHeight / 1.0));
+
+        using Image<Rgba32> img = Image.Load<Rgba32>(path);
+        double imgAspect = img.Width / (double)img.Height;
+        // Fit to width
+        int resizedWidth = targetWidth;
+        int resizedHeight = (int)(resizedWidth / imgAspect * charAspect);
+        if (resizedHeight > targetHeight)
+        {
+            resizedHeight = targetHeight;
+            resizedWidth = (int)(resizedHeight * imgAspect / charAspect);
+        }
+        if (resizedWidth < 8 || resizedHeight < 4) return "[Frame too small after resize]";
+
+        img.Mutate(c => c.Resize(new ResizeOptions
+        {
+            Size = new Size(resizedWidth, resizedHeight),
+            Mode = ResizeMode.Stretch
+        }).Grayscale());
+
+        var sb = new System.Text.StringBuilder(resizedHeight * (resizedWidth + 1));
+        for (int y = 0; y < resizedHeight; y++)
+        {
+            for (int x = 0; x < resizedWidth; x++)
+            {
+                var p = img[x, y];
+                // Convert to luminance
+                double lum = (0.2126 * p.R + 0.7152 * p.G + 0.0722 * p.B) / 255.0; // 0..1
+                // Map luminance (0=dark) to char index (0=darkest char). Optionally invert depending on taste.
+                int idx = (int)((ASCIICHARS.Length - 1) * lum);
+                if (idx < 0) idx = 0; else if (idx >= ASCIICHARS.Length) idx = ASCIICHARS.Length - 1;
+                sb.Append(ASCIICHARS[idx]);
+            }
+            sb.Append('\n');
+        }
+        return sb.ToString();
     }
 
     // Robust WAV parser: scans chunks to find 'fmt ' and 'data'. Supports standard PCM (format code 1) 16-bit.
