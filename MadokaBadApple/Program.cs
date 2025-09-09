@@ -20,25 +20,27 @@ class Program
 
     static async Task Main(string[] args)
     {
-        // (1) Resolve input path (arg or default) relative to current working directory
-        var inputArg = args.Length > 0 ? args[0] : "madoka-bad-apple.mp4";
-        var inputFile = Path.IsPathRooted(inputArg)
-            ? inputArg
-            : Path.GetFullPath(Path.Combine(Directory.GetCurrentDirectory(), inputArg));
-
-        // (2) Validate early
-        if (!File.Exists(inputFile))
+        // Resolve input path (arg or first video in current directory) without printing anything except frames later.
+        string? inputFile = null;
+        if (args.Length > 0)
         {
-            Console.WriteLine("❌ Input file not found:");
-            Console.WriteLine(inputFile);
-            Console.WriteLine("\nTips:");
-            Console.WriteLine(" • Run from the project folder where the video lives, OR pass a correct relative/absolute path.");
-            Console.WriteLine(" • On Linux/macOS, file names are case-sensitive.");
-            Console.WriteLine("\nCurrent directory contents:");
-            foreach (var f in Directory.GetFiles(Directory.GetCurrentDirectory()))
-                Console.WriteLine(" - " + f);
-            return;
+            var inputArg = args[0];
+            inputFile = Path.IsPathRooted(inputArg)
+                ? inputArg
+                : Path.GetFullPath(Path.Combine(Directory.GetCurrentDirectory(), inputArg));
         }
+        else
+        {
+            string cwd = Directory.GetCurrentDirectory();
+            string[] videoExts = [".mp4", ".mkv", ".mov", ".avi", ".webm", ".m4v"]; // simple set, no recursion
+            inputFile = Directory.GetFiles(cwd)
+                                 .Where(f => videoExts.Contains(Path.GetExtension(f), StringComparer.OrdinalIgnoreCase))
+                                 .OrderBy(f => f, StringComparer.OrdinalIgnoreCase)
+                                 .FirstOrDefault();
+        }
+
+        if (string.IsNullOrWhiteSpace(inputFile) || !File.Exists(inputFile))
+            return; // No video found/provided, exit silently
 
         // (3) Prepare output dirs
         var framesDir = Path.GetFullPath(Path.Combine(Directory.GetCurrentDirectory(), "frames"));
@@ -75,35 +77,38 @@ class Program
         // --------------------  VIDEO FRAME EXTRACTION  --------------------
         var pattern = Path.Combine(framesDir, "frame_%06d.png").Replace("\\", "/");
         var frameConversion = FFmpeg.Conversions.New();
-        frameConversion.OnDataReceived += (s, e) =>
-        {
-            if (!string.IsNullOrWhiteSpace(e.Data)) Console.WriteLine(e.Data);
-        };
 
         frameConversion = frameConversion
-            .AddParameter("-hide_banner -loglevel info", ParameterPosition.PreInput)
+            .AddParameter("-hide_banner -loglevel quiet", ParameterPosition.PreInput)
             .AddParameter($"-i \"{inputFile}\"", ParameterPosition.PreInput)
             .AddParameter($"-vf fps={extractFps:0.####}", ParameterPosition.PostInput)
             .AddParameter("-f image2", ParameterPosition.PostInput)
             .SetOverwriteOutput(true)
             .SetOutput($"\"{pattern}\"");
-
-        Console.WriteLine($"FFmpeg command (frames) extracting at ~{extractFps:0.##} fps:");
-        Console.WriteLine(frameConversion.Build());
-        Console.WriteLine("Extracting frames...");
-        await frameConversion.Start();
+        // Loading animation (only permitted non-frame output). No newlines.
+        var loadingTask = frameConversion.Start();
+        string[] loadingStates = ["Loading", "Loading.", "Loading..", "Loading..."];
+        int li = 0;
+        while (!loadingTask.IsCompleted)
+        {
+            try
+            {
+                Console.SetCursorPosition(0, 0);
+                Console.Write(loadingStates[li++ % loadingStates.Length] + "   ");
+            }
+            catch { }
+            await Task.Delay(250);
+        }
+        await loadingTask; // ensure completion
+        try { Console.Clear(); } catch { }
 
         var sampleFrame = Path.Combine(framesDir, "frame_000001.png");
-        Console.WriteLine(File.Exists(sampleFrame)
-            ? $"✅ Frames extracted. Example: {sampleFrame}"
-            : $"⚠️ No frames found in {framesDir}.");
+        // Silent: do not print extraction result
 
         // --------------------  AUDIO EXTRACTION  --------------------
-        Console.WriteLine("\nExtracting audio track...");
         var audioStream = mediaInfo.AudioStreams?.FirstOrDefault();
         if (audioStream == null)
         {
-            Console.WriteLine("⚠️ No audio stream present; skipping audio analysis.");
             return; // nothing else to do
         }
 
@@ -115,47 +120,32 @@ class Program
             .SetOverwriteOutput(true)
             .SetOutput(wavPath);
 
-        audioConversion.OnDataReceived += (s, e) =>
-        {
-            if (!string.IsNullOrWhiteSpace(e.Data)) Console.WriteLine(e.Data);
-        };
+        // Silence audio conversion logs
+        audioConversion.AddParameter("-hide_banner -loglevel quiet", ParameterPosition.PreInput);
 
-        Console.WriteLine("FFmpeg command (audio):");
-        Console.WriteLine(audioConversion.Build());
         await audioConversion.Start();
 
-        if (!File.Exists(wavPath))
-        {
-            Console.WriteLine("❌ Audio extraction failed.");
-            return;
-        }
-        Console.WriteLine($"✅ Audio extracted: {wavPath}");
+        if (!File.Exists(wavPath)) return; // silent failure
 
         // --------------------  PLAY AUDIO + ASCII VIDEO  --------------------
-        Console.WriteLine("\nPlaying audio + ASCII video (Ctrl+C to abort)...");
         try
         {
             // Use the extraction FPS for smoother playback; if something went wrong fallback to even distribution (targetFps<=0)
             int playbackFps = extractFps > 0 ? (int)Math.Round(extractFps) : 0;
             PlayAsciiVideoWithAudio(wavPath, framesDir, targetFps: playbackFps);
         }
-        catch (Exception ex)
+        catch (Exception)
         {
-            Console.WriteLine("Playback error: " + ex.Message);
         }
 
         // --------------------  SIMPLE AUDIO ANALYSIS  --------------------
-        Console.WriteLine("\nAnalyzing first ~5s (100ms windows)...");
         try
         {
             AnalyzeWavApprox(wavPath, maxSeconds: 5);
         }
-        catch (Exception ex)
+        catch (Exception)
         {
-            Console.WriteLine("Audio analysis error: " + ex.Message);
         }
-
-        Console.WriteLine("\nDone.");
     }
 
     // Lightweight approximate frequency + RMS analysis using zero crossing per 100ms window.
@@ -165,7 +155,6 @@ class Program
         using var fs = File.OpenRead(wavPath);
         if (fs.Length < 44)
         {
-            Console.WriteLine("WAV too small.");
             return;
         }
 
@@ -180,7 +169,6 @@ class Program
 
         if (channels != 1 || bitsPerSample != 16)
         {
-            Console.WriteLine($"Unexpected WAV format (channels={channels}, bits={bitsPerSample}). Expected mono 16-bit.");
             return;
         }
 
@@ -193,7 +181,6 @@ class Program
         int samplesRead = actuallyRead / bytesPerSample;
         if (samplesRead == 0)
         {
-            Console.WriteLine("No sample data read.");
             return;
         }
 
@@ -218,7 +205,6 @@ class Program
             double rms = Math.Sqrt(rmsAccum / window);
             double freqEstimate = (zeroCross / 2.0) * (sampleRate / (double)window); // crude
             double tStart = offset / (double)sampleRate;
-            Console.WriteLine($"t={tStart,5:0.00}s  freq≈{freqEstimate,6:0}Hz  rms={rms:0.00}");
         }
     }
 
@@ -234,11 +220,7 @@ class Program
 
         // Gather frames list
         var frames = Directory.GetFiles(framesDir, "frame_*.png").OrderBy(f => f).ToArray();
-        if (frames.Length == 0)
-        {
-            Console.WriteLine("No frames to display.");
-            return;
-        }
+        if (frames.Length == 0) return; // silent
 
         // frameDuration will be determined later (after we know audio totalSeconds)
 
@@ -301,21 +283,13 @@ class Program
                     // Load & convert frame
                     try
                     {
-                        string ascii = FrameToAscii(frames[frameIndex], Console.WindowWidth, Console.WindowHeight - 3); // leave lines for status
+                        string ascii = FrameToAscii(frames[frameIndex], Console.WindowWidth, Console.WindowHeight); // full height
                         Console.SetCursorPosition(0, 0);
-                        Console.Write(ascii);
-                        // Status line
-                        string mode = targetFps > 0
-                            ? $"fixed {targetFps} fps"
-                            : $"even ({frames.Length} frames / {totalSeconds:0.00}s => {1.0 / frameDuration:0.00} fps)";
-                        string status = $"Frame {frameIndex + 1}/{frames.Length}  t={elapsed:0.00}/{totalSeconds:0.00}s  mode={mode} (Ctrl+C to stop)";
-                        int pad = Math.Max(0, Console.WindowWidth - status.Length - 1);
-                        Console.WriteLine("\n" + status + new string(' ', pad));
+                        Console.Write(ascii); // only print frames
                     }
-                    catch (Exception ex)
+                    catch (Exception)
                     {
-                        Console.SetCursorPosition(0, 0);
-                        Console.WriteLine($"[Frame load error: {ex.Message}]");
+                        // Suppress frame load errors
                     }
                     lastRendered = frameIndex;
                 }
@@ -326,13 +300,11 @@ class Program
                 Thread.Sleep(sleep);
             }
 
-            Console.WriteLine();
             al.SourceStop(source);
             al.DeleteSource(source);
             al.DeleteBuffer(buffer);
             alc.DestroyContext(context);
             alc.CloseDevice(device);
-            Console.WriteLine("Playback finished.");
         }
     }
 
