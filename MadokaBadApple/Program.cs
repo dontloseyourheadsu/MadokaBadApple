@@ -52,6 +52,26 @@ class Program
         FFmpeg.SetExecutablesPath(ffDir);
         await FFmpegDownloader.GetLatestVersion(FFmpegVersion.Official, ffDir);
 
+        // --------------------  MEDIA INFO (video+audio)  --------------------
+        var mediaInfo = await FFmpeg.GetMediaInfo(inputFile);
+        var videoStream = mediaInfo.VideoStreams?.FirstOrDefault();
+        double extractFps = 24; // fallback
+        try
+        {
+            if (videoStream != null && videoStream.Framerate > 0)
+            {
+                extractFps = videoStream.Framerate;
+                if (extractFps > 60) extractFps = 60; // cap to avoid huge frame dumps
+            }
+        }
+        catch { /* keep fallback */ }
+
+        // Clean old extracted frames so leftover slow (1 fps) frames don't remain
+        foreach (var old in Directory.GetFiles(framesDir, "frame_*.png"))
+        {
+            try { File.Delete(old); } catch { }
+        }
+
         // --------------------  VIDEO FRAME EXTRACTION  --------------------
         var pattern = Path.Combine(framesDir, "frame_%06d.png").Replace("\\", "/");
         var frameConversion = FFmpeg.Conversions.New();
@@ -63,12 +83,12 @@ class Program
         frameConversion = frameConversion
             .AddParameter("-hide_banner -loglevel info", ParameterPosition.PreInput)
             .AddParameter($"-i \"{inputFile}\"", ParameterPosition.PreInput)
-            .AddParameter("-vf fps=1", ParameterPosition.PostInput)  // change/remove for different sampling
+            .AddParameter($"-vf fps={extractFps:0.####}", ParameterPosition.PostInput)
             .AddParameter("-f image2", ParameterPosition.PostInput)
             .SetOverwriteOutput(true)
             .SetOutput($"\"{pattern}\"");
 
-        Console.WriteLine("FFmpeg command (frames):");
+        Console.WriteLine($"FFmpeg command (frames) extracting at ~{extractFps:0.##} fps:");
         Console.WriteLine(frameConversion.Build());
         Console.WriteLine("Extracting frames...");
         await frameConversion.Start();
@@ -80,7 +100,6 @@ class Program
 
         // --------------------  AUDIO EXTRACTION  --------------------
         Console.WriteLine("\nExtracting audio track...");
-        var mediaInfo = await FFmpeg.GetMediaInfo(inputFile);
         var audioStream = mediaInfo.AudioStreams?.FirstOrDefault();
         if (audioStream == null)
         {
@@ -116,7 +135,9 @@ class Program
         Console.WriteLine("\nPlaying audio + ASCII video (Ctrl+C to abort)...");
         try
         {
-            PlayAsciiVideoWithAudio(wavPath, framesDir, targetFps: 24); // attempt 24 fps if extracted accordingly
+            // Use the extraction FPS for smoother playback; if something went wrong fallback to even distribution (targetFps<=0)
+            int playbackFps = extractFps > 0 ? (int)Math.Round(extractFps) : 0;
+            PlayAsciiVideoWithAudio(wavPath, framesDir, targetFps: playbackFps);
         }
         catch (Exception ex)
         {
@@ -219,7 +240,7 @@ class Program
             return;
         }
 
-        double frameDuration = 1.0 / targetFps;
+        // frameDuration will be determined later (after we know audio totalSeconds)
 
         var alc = ALContext.GetApi();
         var al = AL.GetApi();
@@ -248,6 +269,15 @@ class Program
 
             double totalSeconds = (double)pcm.Length / (channels * (bitsPerSample / 8) * sampleRate);
             DateTime start = DateTime.UtcNow;
+            if (totalSeconds <= 0)
+            {
+                // Fallback: assume 24fps clip length from frame count
+                totalSeconds = frames.Length / 24.0;
+            }
+
+            double frameDuration = targetFps > 0
+                ? 1.0 / targetFps
+                : totalSeconds / frames.Length; // evenly spread frames across audio
             SourceState state;
             Console.CancelKeyPress += (_, e) =>
             {
@@ -264,7 +294,7 @@ class Program
                 double elapsed = (DateTime.UtcNow - start).TotalSeconds;
                 if (elapsed > totalSeconds) elapsed = totalSeconds;
                 int frameIndex = (int)(elapsed / frameDuration);
-                if (frameIndex >= frames.Length) break;
+                if (frameIndex >= frames.Length) frameIndex = frames.Length - 1;
 
                 if (frameIndex != lastRendered)
                 {
@@ -275,7 +305,10 @@ class Program
                         Console.SetCursorPosition(0, 0);
                         Console.Write(ascii);
                         // Status line
-                        string status = $"Frame {frameIndex + 1}/{frames.Length}  t={elapsed:0.00}/{totalSeconds:0.00}s  (Ctrl+C to stop)";
+                        string mode = targetFps > 0
+                            ? $"fixed {targetFps} fps"
+                            : $"even ({frames.Length} frames / {totalSeconds:0.00}s => {1.0 / frameDuration:0.00} fps)";
+                        string status = $"Frame {frameIndex + 1}/{frames.Length}  t={elapsed:0.00}/{totalSeconds:0.00}s  mode={mode} (Ctrl+C to stop)";
                         int pad = Math.Max(0, Console.WindowWidth - status.Length - 1);
                         Console.WriteLine("\n" + status + new string(' ', pad));
                     }
