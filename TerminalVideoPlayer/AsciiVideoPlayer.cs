@@ -3,7 +3,7 @@ using SixLabors.ImageSharp;
 using SixLabors.ImageSharp.PixelFormats;
 using SixLabors.ImageSharp.Processing;
 
-namespace MadokaBadApple;
+namespace TerminalVideoPlayer;
 
 /// <summary>
 /// Handles playback of extracted video frames as ASCII art synchronized with a WAV audio track.

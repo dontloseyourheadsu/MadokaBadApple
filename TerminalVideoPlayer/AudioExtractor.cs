@@ -1,6 +1,6 @@
 using Xabe.FFmpeg;
 
-namespace MadokaBadApple;
+namespace TerminalVideoPlayer;
 
 /// <summary>
 /// Provides audio extraction and lightweight analysis helpers (PCM WAV mono conversion and simple zero-cross based metrics).

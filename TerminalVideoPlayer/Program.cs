@@ -1,4 +1,4 @@
-﻿namespace MadokaBadApple;
+﻿namespace TerminalVideoPlayer;
 
 class Program
 {

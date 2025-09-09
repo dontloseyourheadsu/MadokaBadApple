@@ -1,7 +1,7 @@
 using Xabe.FFmpeg;
 using Xabe.FFmpeg.Downloader;
 
-namespace MadokaBadApple;
+namespace TerminalVideoPlayer;
 
 /// <summary>
 /// Provides utilities for extracting video frames to disk using FFmpeg.

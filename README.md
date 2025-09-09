@@ -1,6 +1,6 @@
-# Madoka Magica Bad Apple
+# Terminal Video Player
 
-ASCII playback of Bad Apple (Madoka Magica version) directly in the console with synchronized audio using .NET 8.
+ASCII playback of videos directly in the console with synchronized audio using .NET 8.
 
 ## Requirements
 
@@ -63,7 +63,7 @@ Executable will be under: `bin/Release/net8.0/win-x64/`.
 
 ```bash
 dotnet publish -c Release
-./bin/Release/net8.0/MadokaBadApple
+./bin/Release/net8.0/TerminalVideoPlayer
 ```
 
 ## Packages Used
